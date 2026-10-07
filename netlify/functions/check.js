@@ -23,7 +23,7 @@ async function curve(mint) {
       const b = Buffer.from(j.result.value.data[0], "base64");
       if (b.length < 49) continue;
       return { address, exists: true, vTok: b.readBigUInt64LE(8).toString(), vSol: b.readBigUInt64LE(16).toString(),
-        rTok: b.readBigUInt64LE(24).toString(), rSol: b.readBigUInt64LE(32).toString(), complete: b[48] === 1 };
+        rTok: b.readBigUInt64LE(24).toString(), rSol: b.readBigUInt64LE(32).toString(), supply: b.readBigUInt64LE(40).toString(), complete: b[48] === 1 };
     } catch (e) {}
   }
   return null;
@@ -40,7 +40,8 @@ exports.handler = async e => {
     g("https://frontend-api-v3.pump.fun/coins/" + ca),
     curve(ca),
     g("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112")]);
-  const best = (sol && sol.pairs || []).filter(p => p.chainId === "solana").sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+  const top = (sol && sol.pairs || []).filter(p => p.chainId === "solana" && Number(p.priceUsd) > 0).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)).slice(0, 5).map(p => Number(p.priceUsd)).sort((a, b) => a - b);
+  const med = top.length ? top[Math.floor(top.length / 2)] : null;
   return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" },
-    body: JSON.stringify({ ok: true, dex, rug, jup, pump, curve: cv, solUsd: best ? Number(best.priceUsd) : null }) };
+    body: JSON.stringify({ ok: true, dex, rug, jup, pump, curve: cv, solUsd: med }) };
 };
