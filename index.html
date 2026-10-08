@@ -98,7 +98,9 @@ function render(ca,d){
   let pfL=0;if(pump?.usd_market_cap&&pump?.market_cap&&pump?.real_sol_reserves!=null)pfL=pump.real_sol_reserves/1e9*(pump.usd_market_cap/pump.market_cap);
   const cvL=cv&&solUsd?Number(cv.rSol)/1e9*solUsd:0;
   const vals=[dxL,jpL,pfL].filter(x=>x>0);
-  const liq=onCurve&&cv?cvL:(onCurve===false&&dxL>0?dxL:(vals.length?Math.min(...vals):0));
+  const hasQ=pair?.liquidity?.quote!=null&&Number(pair.priceNative)>0;
+  const dxQ=hasQ?pair.liquidity.quote*Number(pair.priceUsd)/Number(pair.priceNative):0;
+  const liq=onCurve&&cv?cvL:(hasQ?dxQ:(vals.length?Math.min(...vals):0));
   const spread=vals.length>1&&Math.max(...vals)/Math.min(...vals)>1.3?vals.slice().sort((a,b)=>a-b):null;
   const sup=cv?(Number(cv.supply)/1e6||1e9):1e9;
   const cvMcap=cv&&solUsd&&Number(cv.vTok)>0?Number(cv.vSol)/1e9/(Number(cv.vTok)/1e6)*sup*solUsd:0;
@@ -180,12 +182,12 @@ function render(ca,d){
   // 10 Liquidity and exit
   if(!any)add("na","Liquidity and exit","No data.");
   else{const size=parseFloat($("size").value)||1,ex=exitModel(size,{cv,pair,solUsd,onCurve}),r=mcap?liq/mcap:0;
-    let st="pass",tx="Liquidity "+fmt(liq)+(onCurve&&cv?" ("+(Number(cv.rSol)/1e9).toFixed(1)+" real SOL in the curve, about "+Math.round(Number(cv.rSol)/85e9*100)+"% bonded, read from the chain)":"")+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+".";
+    let st="pass",tx="Liquidity "+fmt(liq)+(onCurve&&cv?" ("+(Number(cv.rSol)/1e9).toFixed(1)+" real SOL in the curve, about "+Math.round(Number(cv.rSol)/85e9*100)+"% bonded, read from the chain)":"")+(!(onCurve&&cv)&&hasQ&&dxL>dxQ*1.2?" (the side you sell into; the two-sided pool total is "+fmt(dxL)+")":"")+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+".";
     const worse=(a,b)=>({pass:0,warn:1,fail:2}[b]>{pass:0,warn:1,fail:2}[a]?b:a);
     if(onCurve&&cv){if(cvL<500){st="warn";tx+=" Very little real SOL in the curve."}}
-    else if(liq<1000){if(onCurve===false){st="fail";tx+=" Graduated with no liquidity. You may not be able to sell."}else{st="warn";tx+=" Probably still on the bonding curve, and this deployment cannot read the chain. Check LP on your bot."}}
-    else if(r<0.01){st="fail";tx+=" Liquidity is tiny compared to the market cap."}
-    else st=(liq<10000||r<0.03)?"warn":"pass";
+    else if(liq<500){if(onCurve===false){st="fail";tx+=" Graduated with no liquidity. You may not be able to sell."}else{st="warn";tx+=" Probably still on the bonding curve, and this deployment cannot read the chain. Check LP on your bot."}}
+    else if(r<0.005){st="fail";tx+=" Liquidity is tiny compared to the market cap."}
+    else st=(liq<5000||r<0.015)?"warn":"pass";
     if(ex){if(!ex.fill){st="fail";tx+=" Selling "+fmt(size)+" is more than the curve holds."}
       else{const sl=ex.slip*100;tx+=" Selling "+fmt(size)+" returns about "+fmt(ex.usd)+" ("+sl.toFixed(1)+"% lost to fees and price impact).";st=worse(st,sl>15?"fail":sl>6?"warn":"pass")}}
     if(spread)tx+=" Sources disagree ("+spread.map(fmt).join(" to ")+"), so the lowest is used.";
@@ -231,7 +233,7 @@ function renderEvm(ca,d){
   const {pair,tok,hold,addr,onRH}=d,C=[],add=(s,t,x)=>C.push({s,t,d:x});
   const chain=pair?.chainId||"robinhood",items=hold?.items||[],supRaw=Number(tok?.total_supply);
   const cr0=addr?.creator_address_hash,cr=EVM.test(cr0||"")?cr0:null;
-  const mcap=pair?.marketCap||pair?.fdv||0,liq=pair?.liquidity?.usd||0;
+  const mcap=pair?.marketCap||pair?.fdv||0,dxL=pair?.liquidity?.usd||0,hasQ=pair?.liquidity?.quote!=null&&Number(pair.priceNative)>0,dxQ=hasQ?pair.liquidity.quote*Number(pair.priceUsd)/Number(pair.priceNative):0,liq=hasQ?dxQ:dxL;
 
   if(!onRH)add("na","Explorer checks","This token is on "+chain+", so holder and contract checks are skipped.");
   if(onRH){
@@ -254,22 +256,22 @@ function renderEvm(ca,d){
   if(!isNaN(bun))add(bun>=20?"fail":bun>=10?"warn":"pass","Bundlers (from your bot)",bun+"% of supply bought in bundles.");
 
   if(pair?.pairCreatedAt){const m=(Date.now()-pair.pairCreatedAt)/60000;
-    add(m<30?"warn":"pass","Pair age",(m<60?Math.round(m)+" minutes":(m/60).toFixed(1)+" hours")+" old."+(m<30?" Very new.":""))}
+    add(m<30?"warn":"pass","Pair age",(m<60?Math.round(m)+" minutes":m<2880?(m/60).toFixed(1)+" hours":Math.round(m/1440)+" days")+" old."+(m<30?" Very new.":""))}
   const t1=pair?.txns?.h1;
   if(!t1)add("na","Buy and sell flow","No data.");
   else{const b=t1.buys||0,sl=t1.sells||0;add(b+sl<20?"warn":sl>b*2?"fail":sl>b*1.3?"warn":"pass","Buy and sell flow","Last hour: "+b+" buys, "+sl+" sells.")}
   const c=pair?.priceChange;
   if(!c)add("na","Price momentum","No data.");
-  else{const hot=c.h1>100||c.m5>40||c.h24>300;
-    add(c.h1<=-30?"fail":(c.m5<-5||c.h1<-10||hot)?"warn":"pass","Price momentum","5m "+pct(c.m5)+", 1h "+pct(c.h1)+", 24h "+pct(c.h24)+(hot?". Already ran hard, so a 2x from here is a chase.":"."))}
+  else{const hot=c.h1>100||c.m5>40||c.h24>300,stale=c.m5==null&&c.h1==null;
+    add(c.h1<=-30?"fail":(stale||c.m5<-5||c.h1<-10||hot)?"warn":"pass","Price momentum","5m "+pct(c.m5)+", 1h "+pct(c.h1)+", 24h "+pct(c.h24)+(hot?". Already ran hard, so a 2x from here is a chase.":".")+(stale?" No recent trades, so these numbers are old.":""))}
   if(!pair)add("na","Socials","No data.");
   else{const so=pair.info?.socials||[],web=pair.info?.websites||[],n=so.length+web.length,x=so.some(s=>/twitter|x/i.test(s.type));
     add(x&&n>=2?"pass":"warn","Socials",n?((x?"X account listed. ":"No X account. ")+n+" link(s). Check the account is real and not brand new."):"No social links listed.")}
   if(!pair)add("na","Liquidity vs market cap","No pair found on DexScreener.");
-  else{const r=mcap?liq/mcap:0;let st=liq<1000||(mcap&&r<0.01)?"fail":(liq<10000||r<0.03)?"warn":"pass";
+  else{const r=mcap?liq/mcap:0;let st=liq<500||(mcap&&r<0.005)?"fail":(liq<5000||r<0.015)?"warn":"pass";
     const size=parseFloat($("size").value)||1,ex=exitModel(size,{pair});let xt="";
     if(ex&&ex.fill){const sl=ex.slip*100;xt=" Selling "+fmt(size)+" returns about "+fmt(ex.usd)+" ("+sl.toFixed(1)+"% lost to fees and price impact).";if(sl>15)st="fail";else if(sl>6&&st==="pass")st="warn"}
-    add(st,"Liquidity and exit","Liquidity "+fmt(liq)+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+(st==="fail"?". You may not be able to sell.":".")+xt)}
+    add(st,"Liquidity and exit","Liquidity "+fmt(liq)+(hasQ&&dxL>dxQ*1.2?" (the side you sell into; the two-sided pool total is "+fmt(dxL)+")":"")+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+(st==="fail"?". You may not be able to sell.":".")+xt)}
   add("warn","Honeypot, tax and LP lock","Not checked in this mode. Test with a tiny buy and sell before sizing up.");
 
   const f=C.filter(x=>x.s==="fail").length,w=C.filter(x=>x.s==="warn").length,n=C.filter(x=>x.s==="na").length;
@@ -298,6 +300,7 @@ function exitModel(size,{cv,pair,solUsd,onCurve}){
     if(out>rS)return{fill:false};const usd=out/1e9*solUsd;return{fill:true,usd,slip:1-usd/size}}
   const L=pair?.liquidity;
   if(L&&L.base>0&&L.quote>0&&Number(pair.priceUsd)>0&&Number(pair.priceNative)>0){
+    if(Math.abs((L.quote/L.base)/Number(pair.priceNative)-1)>0.08)return null;
     const pu=Number(pair.priceUsd),a=size/pu*0.99,usd=L.quote*a/(L.base+a)*(pu/Number(pair.priceNative));return{fill:true,usd,slip:1-usd/size}}
   return null}
 function logLine(ca,name,verdict,C,onCurve,mcap){
