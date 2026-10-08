@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CA Checker</title>
+<style>
+:root{--bg:#121826;--panel:#1a2233;--line:#2a344a;--ink:#e8ecf2;--mute:#8a96ab;--pass:#4fd6a0;--warn:#f2b84b;--fail:#ff6b7a;--na:#6b778c}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 "IBM Plex Sans",system-ui,-apple-system,sans-serif}
+main{max-width:560px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) 16px 40px}
+h1{font-size:22px;font-weight:600;margin:8px 0 4px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 18px;font-size:14px}
+.row{display:flex;gap:8px}
+input{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:14px;font:15px ui-monospace,Menlo,monospace}
+input:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+button{border:0;border-radius:10px;padding:0 16px;font:600 15px inherit;font-family:inherit;cursor:pointer}
+.go{background:var(--ink);color:var(--bg);width:100%;padding:14px;margin-top:10px}
+.paste{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+.verdict{margin:22px 0 14px;padding:18px;border-radius:14px;border:1px solid var(--line);background:var(--panel)}
+.verdict b{display:block;font-size:26px;line-height:1.15;letter-spacing:-.02em}
+.verdict span{color:var(--mute);font-size:14px}
+.verdict.pass{border-color:var(--pass)}.verdict.pass b{color:var(--pass)}
+.verdict.warn{border-color:var(--warn)}.verdict.warn b{color:var(--warn)}
+.verdict.fail{border-color:var(--fail)}.verdict.fail b{color:var(--fail)}
+.tok{color:var(--mute);font-size:14px;margin:0 0 10px}
+.chk{display:grid;grid-template-columns:28px 1fr;gap:12px;padding:13px 0;border-top:1px solid var(--line)}
+.dot{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;color:var(--bg)}
+.dot.pass{background:var(--pass)}.dot.warn{background:var(--warn)}.dot.fail{background:var(--fail)}.dot.na{background:var(--na)}
+.chk h3{margin:0;font-size:15px;font-weight:600}
+.chk p{margin:2px 0 0;color:var(--mute);font-size:14px;overflow-wrap:anywhere}
+.links{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.links a{color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:8px 14px;text-decoration:none;font-size:14px}
+.opt{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}.opt label{font-size:12px;color:var(--mute);display:block;margin-bottom:4px}.opt input,.opt select{width:100%;padding:11px;font-size:15px;background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:10px}.src{color:var(--mute);font-size:12px;margin:0 0 6px}.note{color:var(--mute);font-size:13px;margin-top:18px}
+.err{color:var(--fail);margin-top:14px}
+@media(prefers-color-scheme:light){:root{--bg:#f3f5f9;--panel:#fff;--line:#d9dfea;--ink:#141a28;--mute:#5d6a82;--pass:#0f9d6b;--warn:#b7791f;--fail:#d6303f}.dot{color:#fff}.go{color:#fff}}
+</style>
+</head>
+<body>
+<main>
+<h1>CA Checker</h1>
+<p class="sub">Paste a Solana or Robinhood Chain token address. Runs the scam checks and gives a verdict.</p>
+<div class="row"><input id="ca" placeholder="Contract address" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="paste" id="paste">Paste</button></div>
+<div class="opt"><div><label for="bun">Bundler % (bot)</label><input id="bun" type="number" inputmode="decimal" placeholder="25"></div>
+<div><label for="dsold">Dev Sold (bot)</label><select id="dsold"><option value="">Not checked</option><option value="yes">Green: sold</option><option value="no">Red: not sold</option></select></div>
+<div><label for="size">Size ($)</label><input id="size" type="number" inputmode="decimal" value="1"></div></div>
+<button class="go" id="go">Check token</button>
+<div id="out" aria-live="polite"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=n=>n==null||isNaN(n)?"?":n>=1e9?"$"+(n/1e9).toFixed(2)+"B":n>=1e6?"$"+(n/1e6).toFixed(2)+"M":n>=1e3?"$"+(n/1e3).toFixed(1)+"K":"$"+Number(n).toFixed(2);
+const pct=n=>n==null||isNaN(n)?"?":(n>0?"+":"")+Math.round(n*10)/10+"%";
+const J=(u,ms=9000)=>{const c=new AbortController(),t=setTimeout(()=>c.abort(),ms);return fetch(u,{signal:c.signal}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).finally(()=>clearTimeout(t))};
+const B58=/^[1-9A-HJ-NP-Za-km-z]{32,44}$/,EVM=/^0x[0-9a-fA-F]{40}$/;let busy=false;
+$("paste").onclick=async()=>{try{$("ca").value=(await navigator.clipboard.readText()).trim()}catch(e){$("ca").focus()}};
+$("go").onclick=run;
+$("ca").addEventListener("keydown",e=>{if(e.key==="Enter")run()});
+
+async function run(){
+  if(busy)return;
+  const ca=$("ca").value.trim(),out=$("out");
+  if(!B58.test(ca)&&!EVM.test(ca)){out.innerHTML='<p class="err">That is not a valid Solana or 0x address. Copy the full contract address and try again.</p>';return}
+  busy=true;$("go").textContent="Checking…";
+  out.innerHTML='<p class="sub" style="margin-top:20px">Checking…</p>';
+  try{
+  if(EVM.test(ca)){await runEvm(ca);return}
+  let R=null;try{R=await J("/.netlify/functions/check?ca="+ca,25000);if(!R||!R.ok)R=null}catch(e){}
+  const sv=v=>v?{status:"fulfilled",value:v}:{status:"rejected"};
+  const [dx,rc,jp,pf]=R?[sv(R.dex),sv(R.rug),sv(R.jup),sv(R.pump)]:await Promise.allSettled([
+    J("https://api.dexscreener.com/latest/dex/tokens/"+ca),
+    J("https://api.rugcheck.xyz/v1/tokens/"+ca+"/report"),
+    J("https://lite-api.jup.ag/tokens/v2/search?query="+ca),
+    J("https://frontend-api-v3.pump.fun/coins/"+ca)
+  ]);
+  const pairs=dx.status==="fulfilled"?(dx.value.pairs||[]).filter(p=>p.chainId==="solana"):[];
+  const pair=pairs.sort((a,b)=>(b.liquidity?.usd||0)-(a.liquidity?.usd||0))[0];
+  const rep=rc.status==="fulfilled"?rc.value:null;
+  const jup=jp.status==="fulfilled"?(Array.isArray(jp.value)?jp.value:[]).find(t=>t.id===ca):null;
+  const pump=pf.status==="fulfilled"?pf.value:null;
+  let hist=null;const cr0=rep?.creator||pump?.creator,creator=B58.test(cr0||"")?cr0:null;
+  if(creator){try{const h=await J("https://frontend-api-v3.pump.fun/coins/user-created-coins/"+creator+"?offset=0&limit=50&includeNsfw=true");hist=Array.isArray(h)?h:(h.coins||null)}catch(e){}}
+  render(ca,{pair,rep,jup,pump,hist,creator,curve:R?.curve||null,solUsd:R?.solUsd||null,ok:{DexScreener:!!pair,RugCheck:!!rep,Jupiter:!!jup,"Pump.fun":!!pump,"Chain read":!!(R?.curve&&R.curve.exists)}});
+  }catch(e){out.innerHTML='<p class="err">Something went wrong. Check your connection and try again.</p>'}
+  finally{busy=false;$("go").textContent="Check token"}
+}
+
+function render(ca,d){
+  const {pair,rep,jup,pump,hist,creator}=d;
+  const C=[];const add=(s,t,x)=>C.push({s,t,d:x});
+  const risks=rep?.risks||[],top=rep?.topHolders||[];
+  const cv=d.curve&&d.curve.exists?d.curve:null;
+  const solUsd=d.solUsd||(pair&&pair.quoteToken?.symbol==="SOL"&&Number(pair.priceNative)>0?Number(pair.priceUsd)/Number(pair.priceNative):null);
+  const onCurve=cv?!cv.complete:typeof pump?.complete==="boolean"?pump.complete===false:(jup&&/pump/i.test(jup.launchpad||"")&&!jup.graduatedPool?true:(jup?false:null));
+
+  // Market data merged from all sources
+  const dxL=pair?.liquidity?.usd||0,jpL=jup?.liquidity||0;
+  let pfL=0;if(pump?.usd_market_cap&&pump?.market_cap&&pump?.real_sol_reserves!=null)pfL=pump.real_sol_reserves/1e9*(pump.usd_market_cap/pump.market_cap);
+  const cvL=cv&&solUsd?Number(cv.rSol)/1e9*solUsd:0;
+  const vals=[dxL,jpL,pfL].filter(x=>x>0);
+  const hasQ=pair?.liquidity?.quote!=null&&Number(pair.priceNative)>0;
+  const dxQ=hasQ?pair.liquidity.quote*Number(pair.priceUsd)/Number(pair.priceNative):0;
+  const liq=onCurve&&cv?cvL:(hasQ?dxQ:(vals.length?Math.min(...vals):0));
+  const spread=vals.length>1&&Math.max(...vals)/Math.min(...vals)>1.3?vals.slice().sort((a,b)=>a-b):null;
+  const sup=cv?(Number(cv.supply)/1e6||1e9):1e9;
+  const cvMcap=cv&&solUsd&&Number(cv.vTok)>0?Number(cv.vSol)/1e9/(Number(cv.vTok)/1e6)*sup*solUsd:0;
+  const mcap=(cv&&onCurve&&cvMcap)||(onCurve&&pump?.usd_market_cap)||pair?.marketCap||pair?.fdv||jup?.mcap||pump?.usd_market_cap||0;
+  const any=pair||jup||pump;
+
+  // 1 Authorities
+  const mOff=rep?!rep.mintAuthority:jup?.audit?.mintAuthorityDisabled,fOff=rep?!rep.freezeAuthority:jup?.audit?.freezeAuthorityDisabled;
+  if(mOff==null)add("na","Mint and freeze authority","No data. Check the Security tab on Birdeye.");
+  else if(!mOff||!fOff)add("fail","Mint and freeze authority",(!mOff?"Mint authority is still active. ":"")+(!fOff?"Freeze authority is still active.":""));
+  else add("pass","Mint and freeze authority","Both revoked.");
+
+  // 2 RugCheck
+  if(!rep)add("na","RugCheck report","Could not load.");
+  else{const bad=risks.filter(r=>/danger/i.test(r.level)),w=risks.filter(r=>/warn/i.test(r.level));
+    if(rep.rugged)add("fail","RugCheck report","RugCheck marks this token as rugged.");
+    else if(bad.length)add("fail","RugCheck report",bad.map(r=>r.name).join(", "));
+    else if(w.length)add("warn","RugCheck report",w.map(r=>r.name).join(", "));
+    else add("pass","RugCheck report","No risks flagged.")}
+
+  // 3 Top holders
+  if(rep){const pool=new Set();[pair?.pairAddress,d.curve&&d.curve.address].concat((rep.markets||[]).flatMap(m=>[m.pubkey,m.liquidityA,m.liquidityB])).forEach(x=>x&&pool.add(x));
+    const isPool=h=>(h.address&&pool.has(h.address))||(h.owner&&pool.has(h.owner));
+    const real=top.filter(h=>!isPool(h)),removed=top.length-real.length;
+    const t=real.slice(0,10).reduce((a,h)=>a+(h.pct||0),0),sure=removed>0||onCurve===false||!!cv;
+    add(t>(sure?40:70)&&!(onCurve&&!sure)?"fail":t>25?"warn":"pass","Top 10 holders",t.toFixed(1)+"% held by the top 10"+(removed>0?" (pool excluded).":". The curve or pool may be counted, so confirm on Bubblemaps."))}
+  else if(jup?.audit?.topHoldersPercentage!=null){const t=jup.audit.topHoldersPercentage;add(t>40?"warn":t>25?"warn":"pass","Top 10 holders",t.toFixed(1)+"% held by the top holders (pool may be included).")}
+  else add("na","Top 10 holders","Could not load.");
+
+  // 4 Insiders (RugCheck)
+  if(!rep)add("na","Insiders and linked wallets","Could not load.");
+  else{const ins=top.filter(h=>h.insider),s=ins.reduce((a,h)=>a+(h.pct||0),0),nw=rep.insiderNetworks||[],nets=nw.length;
+    const sup=Number(rep.token?.supply);let np=null;
+    if(sup>0){const t=nw.reduce((a,n)=>a+Number(n.tokenAmount||0),0);if(t>0&&t/sup<=1.01)np=t/sup*100}
+    const big=Math.max(s,np||0);
+    add(big>=10?"fail":(big>0||nets>0)?"warn":"pass","Insiders and linked wallets",nets||s?s.toFixed(1)+"% in insider wallets, "+nets+" linked network(s)"+(np!=null?" holding about "+np.toFixed(1)+"% of supply":"")+". Confirm on Bubblemaps.":"None detected.")}
+
+  // 5 Bundlers (manual from bot)
+  const bun=parseFloat($("bun").value);
+  if(!isNaN(bun))add(bun>=20?"fail":bun>=10?"warn":"pass","Bundlers (from your bot)",bun+"% of supply bought in bundles."+(bun>=20?" That is a lot of coordinated supply.":""));
+
+  // 6 Dev
+  const dsold=$("dsold").value;
+  const inTop=creator&&top.find(h=>h.address===creator||h.owner===creator);
+  let dst="pass",dtxt=creator?"Creator "+creator.slice(0,4)+"…"+creator.slice(-4)+". ":"";
+  if(dsold==="yes"){dst="fail";dtxt+="Your bot shows the dev has sold."}
+  else{
+    if(inTop){dtxt+="Holds about "+inTop.pct.toFixed(1)+"% of supply. ";if(inTop.pct>5)dst="warn"}
+    else dtxt+="Not among the top holders. ";
+    if(dsold==="no")dtxt+="Bot shows no dev sells. ";else{dtxt+="Dev sells cannot be detected here, so check the bot's Dev Sold light. ";if(!creator)dst="na"}
+  }
+  if(hist){const n=hist.length,g=hist.filter(c=>c.complete).length;
+    dtxt+="Dev has launched "+(n>=50?"50+":n)+" token(s), "+g+" graduated. ";
+    if(dst==="pass"&&n>=30&&g/n<0.05){dst="warn";dtxt+="Serial launcher with almost none graduating."}}
+  else dtxt+="Launch history unavailable.";
+  add(dst,"Dev wallet",dtxt);
+
+  // 7 Flow
+  const t1=pair?.txns?.h1,b=t1?t1.buys:jup?.stats1h?.numBuys,sl=t1?t1.sells:jup?.stats1h?.numSells;
+  if(b==null)add("na","Buy and sell flow","No data.");
+  else add(b+sl<20?"warn":sl>b*2?"fail":sl>b*1.3?"warn":"pass","Buy and sell flow","Last hour: "+b+" buys, "+sl+" sells."+(b+sl<20?" Very little activity.":""));
+
+  // 8 Momentum
+  const pc=pair?.priceChange||{};const c=(jup?.stats1h||pair)?{m5:jup?.stats5m?.priceChange??pc.m5,h1:jup?.stats1h?.priceChange??pc.h1,h24:jup?.stats24h?.priceChange??pc.h24}:null;
+  if(!c)add("na","Price momentum","No data.");
+  else{const ath=pump?.ath_market_cap,dd=ath&&mcap?(1-mcap/ath)*100:null;
+    const hot=c.h1>100||c.m5>40||c.h24>300;
+    const st=c.h1<=-30||dd>=50?"fail":(c.m5<-5||c.h1<-10||hot||dd>=30)?"warn":"pass";
+    add(st,"Price momentum","5m "+pct(c.m5)+", 1h "+pct(c.h1)+", 24h "+pct(c.h24)+(dd!=null&&dd>=10?". "+Math.round(dd)+"% below its peak":"")+(hot?". Already ran hard, so a 2x from here is a chase.":"."))}
+
+  const born=pair?.pairCreatedAt||(jup?.firstPool?.createdAt&&Date.parse(jup.firstPool.createdAt))||pump?.created_timestamp;
+  if(born&&C[C.length-1].t==="Price momentum"&&(Date.now()-born)/60000<60)C[C.length-1].d+=" Token is under an hour old, so 1h and 24h both mean since launch.";
+  // 9 Socials
+  if(!pair&&!jup)add("na","Socials","No data.");
+  else{const so=pair?.info?.socials||[],web=pair?.info?.websites||[];
+    const jx=jup?.twitter?1:0,n=so.length+web.length+jx+(jup?.website?1:0),x=so.some(s=>/twitter|x/i.test(s.type))||jx;
+    add(x&&n>=2?"pass":"warn","Socials",n?((x?"X account listed. ":"No X account. ")+n+" link(s). Check the account is real and not brand new."):"No social links listed.")}
+
+  // 10 Liquidity and exit
+  if(!any)add("na","Liquidity and exit","No data.");
+  else{const size=parseFloat($("size").value)||1,ex=exitModel(size,{cv,pair,solUsd,onCurve}),r=mcap?liq/mcap:0;
+    let st="pass",tx="Liquidity "+fmt(liq)+(onCurve&&cv?" ("+(Number(cv.rSol)/1e9).toFixed(1)+" real SOL in the curve, about "+Math.round(Number(cv.rSol)/85e9*100)+"% bonded, read from the chain)":"")+(!(onCurve&&cv)&&hasQ&&dxL>dxQ*1.2?" (the side you sell into; the two-sided pool total is "+fmt(dxL)+")":"")+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+".";
+    const worse=(a,b)=>({pass:0,warn:1,fail:2}[b]>{pass:0,warn:1,fail:2}[a]?b:a);
+    if(onCurve&&cv){if(cvL<500){st="warn";tx+=" Very little real SOL in the curve."}}
+    else if(liq<500){if(onCurve===false){st="fail";tx+=" Graduated with no liquidity. You may not be able to sell."}else{st="warn";tx+=" Probably still on the bonding curve, and this deployment cannot read the chain. Check LP on your bot."}}
+    else if(r<0.005){st="fail";tx+=" Liquidity is tiny compared to the market cap."}
+    else st=(liq<5000||r<0.015)?"warn":"pass";
+    if(ex){if(!ex.fill){st="fail";tx+=" Selling "+fmt(size)+" is more than the curve holds."}
+      else{const sl=ex.slip*100;tx+=" Selling "+fmt(size)+" returns about "+fmt(ex.usd)+" ("+sl.toFixed(1)+"% lost to fees and price impact).";st=worse(st,sl>15?"fail":sl>6?"warn":"pass")}}
+    if(spread)tx+=" Sources disagree ("+spread.map(fmt).join(" to ")+"), so the lowest is used.";
+    const dxMc=pair?.marketCap||pair?.fdv||0;
+    if(cv&&cvMcap&&dxMc&&Math.abs(cvMcap/dxMc-1)>0.25)tx+=" Chain-derived market cap is "+fmt(cvMcap)+" versus "+fmt(dxMc)+" from the aggregator.";
+    if(onCurve&&!cv){st="warn";tx="Liquidity unverified: the curve could not be read from the chain, so no aggregator figure is shown. Market cap "+fmt(mcap)+". Check LP on your terminal."}
+    add(st,"Liquidity and exit",tx)}
+
+  const f=C.filter(x=>x.s==="fail").length,w=C.filter(x=>x.s==="warn").length,n=C.filter(x=>x.s==="na").length;
+  let cls,head,sub;
+  if(f){cls="fail";head="Skip it";sub=f+" check"+(f>1?"s":"")+" failed."}
+  else if(n>=3){cls="warn";head="Incomplete";sub="Too many checks could not load. Do the rest by hand."}
+  else if(w){cls="warn";head="Caution";sub=w+" warning"+(w>1?"s":"")+". Look closely before buying."}
+  else{cls="pass";head="Passes automated checks";sub="Still run Bubblemaps by hand."}
+  if(cls!=="fail"&&isNaN(bun))sub+=" Enter the bot's Bundler % for a fuller check.";
+
+  const sym={pass:"✓",warn:"!",fail:"✕",na:"?"};
+  window.__log=null;
+  const name=pair?(pair.baseToken?.name+" ("+pair.baseToken?.symbol+")"):jup?(jup.name+" ("+jup.symbol+")"):pump?(pump.name+" ("+pump.symbol+")"):"Unknown token";
+  window.__log=logLine(ca,name,head,C,onCurve,mcap);
+  const srcs=Object.entries(d.ok).map(([k,v])=>k+" "+(v?"✓":"✗")).join(" · ");
+  $("out").innerHTML=
+   `<div class="verdict ${cls}"><b>${head}</b><span>${esc(sub)}</span></div>`+
+   `<p class="tok">${esc(name)}${onCurve?" · on bonding curve":""}</p><p class="src">${srcs}</p>`+
+   C.map(x=>`<div class="chk"><div class="dot ${x.s}">${sym[x.s]}</div><div><h3>${x.t}</h3><p>${esc(x.d)}</p></div></div>`).join("")+
+   `<div class="links"><a target="_blank" rel="noopener" href="https://app.bubblemaps.io/sol/token/${ca}">Bubblemaps</a>`+
+   `<a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/${ca}">RugCheck</a>`+
+   `<a target="_blank" rel="noopener" href="https://dexscreener.com/solana/${ca}">DexScreener</a>`+
+   (creator?`<a target="_blank" rel="noopener" href="https://solscan.io/account/${creator}">Dev wallet</a>`:"")+`</div>`+
+   `<button class="paste" id="cp" style="margin-top:14px;padding:12px 16px">Copy log line</button><p class="note">Automated checks lower your odds of a rug but cannot prove a token is safe. Tokens can pass everything and still dump. Checker v3.</p>`;
+}
+async function runEvm(ca){
+  const BS="https://robinhoodchain.blockscout.com/api/v2/";
+  const dxr=await J("https://api.dexscreener.com/latest/dex/tokens/"+ca).catch(()=>null);
+  const all=(dxr?.pairs||[]).sort((a,b)=>(b.liquidity?.usd||0)-(a.liquidity?.usd||0));
+  const pair=all.find(p=>p.chainId==="robinhood")||all[0]||null;
+  const onRH=!pair||pair.chainId==="robinhood";
+  let tok=null,hold=null,addr=null;
+  if(onRH)[tok,hold,addr]=await Promise.all([J(BS+"tokens/"+ca).catch(()=>null),J(BS+"tokens/"+ca+"/holders").catch(()=>null),J(BS+"addresses/"+ca).catch(()=>null)]);
+  renderEvm(ca,{pair,tok,hold,addr,onRH});
+}
+function renderEvm(ca,d){
+  const {pair,tok,hold,addr,onRH}=d,C=[],add=(s,t,x)=>C.push({s,t,d:x});
+  const chain=pair?.chainId||"robinhood",items=hold?.items||[],supRaw=Number(tok?.total_supply);
+  const cr0=addr?.creator_address_hash,cr=EVM.test(cr0||"")?cr0:null;
+  const mcap=pair?.marketCap||pair?.fdv||0,dxL=pair?.liquidity?.usd||0,hasQ=pair?.liquidity?.quote!=null&&Number(pair.priceNative)>0,dxQ=hasQ?pair.liquidity.quote*Number(pair.priceUsd)/Number(pair.priceNative):0,liq=hasQ?dxQ:dxL;
+
+  if(!onRH)add("na","Explorer checks","This token is on "+chain+", so holder and contract checks are skipped.");
+  if(onRH){
+    if(!addr)add("na","Contract verified","Explorer data unavailable.");
+    else add(addr.is_verified?"pass":"warn","Contract verified",addr.is_verified?"Source code is verified on the explorer.":"Source is not verified, so hidden taxes or owner powers cannot be inspected.");
+    if(!items.length||!(supRaw>0))add("na","Top 10 holders","Holder data unavailable.");
+    else{const t=items.filter(i=>!i.address?.is_contract).slice(0,10).reduce((a,i)=>a+Number(i.value)/supRaw*100,0);
+      add(t>40?"fail":t>25?"warn":"pass","Top 10 holders",t.toFixed(1)+"% held by the top 10 wallets (pool and curve contracts excluded).")}
+    const hc=Number(tok?.holders_count??tok?.holders);
+    if(hc>0)add(hc<50?"warn":"pass","Holder count",hc+" holders."+(hc<50?" Very few.":""));
+    const dsold=$("dsold").value;let dst="pass",dtxt=cr?"Creator "+cr.slice(0,6)+"…"+cr.slice(-4)+". ":"";
+    const mine=cr&&items.find(i=>(i.address?.hash||"").toLowerCase()===cr.toLowerCase());
+    if(dsold==="yes"){dst="fail";dtxt+="Your bot shows the dev has sold."}
+    else{if(mine&&supRaw>0){const p=Number(mine.value)/supRaw*100;dtxt+="Holds about "+p.toFixed(1)+"% of supply. ";if(p>5)dst="warn"}
+      else dtxt+="Not among the top holders. ";
+      dtxt+=dsold==="no"?"Bot shows no dev sells.":"Dev sells cannot be detected here.";if(!cr)dst="na"}
+    add(dst,"Dev wallet",dtxt)}
+
+  const bun=parseFloat($("bun").value);
+  if(!isNaN(bun))add(bun>=20?"fail":bun>=10?"warn":"pass","Bundlers (from your bot)",bun+"% of supply bought in bundles.");
+
+  if(pair?.pairCreatedAt){const m=(Date.now()-pair.pairCreatedAt)/60000;
+    add(m<30?"warn":"pass","Pair age",(m<60?Math.round(m)+" minutes":m<2880?(m/60).toFixed(1)+" hours":Math.round(m/1440)+" days")+" old."+(m<30?" Very new.":""))}
+  const t1=pair?.txns?.h1;
+  if(!t1)add("na","Buy and sell flow","No data.");
+  else{const b=t1.buys||0,sl=t1.sells||0;add(b+sl<20?"warn":sl>b*2?"fail":sl>b*1.3?"warn":"pass","Buy and sell flow","Last hour: "+b+" buys, "+sl+" sells.")}
+  const c=pair?.priceChange;
+  if(!c)add("na","Price momentum","No data.");
+  else{const hot=c.h1>100||c.m5>40||c.h24>300,stale=c.m5==null&&c.h1==null;
+    add(c.h1<=-30?"fail":(stale||c.m5<-5||c.h1<-10||hot)?"warn":"pass","Price momentum","5m "+pct(c.m5)+", 1h "+pct(c.h1)+", 24h "+pct(c.h24)+(hot?". Already ran hard, so a 2x from here is a chase.":".")+(stale?" No recent trades, so these numbers are old.":""))}
+  if(!pair)add("na","Socials","No data.");
+  else{const so=pair.info?.socials||[],web=pair.info?.websites||[],n=so.length+web.length,x=so.some(s=>/twitter|x/i.test(s.type));
+    add(x&&n>=2?"pass":"warn","Socials",n?((x?"X account listed. ":"No X account. ")+n+" link(s). Check the account is real and not brand new."):"No social links listed.")}
+  if(!pair)add("na","Liquidity vs market cap","No pair found on DexScreener.");
+  else{const r=mcap?liq/mcap:0;let st=liq<500||(mcap&&r<0.005)?"fail":(liq<5000||r<0.015)?"warn":"pass";
+    const size=parseFloat($("size").value)||1,ex=exitModel(size,{pair});let xt="";
+    if(ex&&ex.fill){const sl=ex.slip*100;xt=" Selling "+fmt(size)+" returns about "+fmt(ex.usd)+" ("+sl.toFixed(1)+"% lost to fees and price impact).";if(sl>15)st="fail";else if(sl>6&&st==="pass")st="warn"}
+    add(st,"Liquidity and exit","Liquidity "+fmt(liq)+(hasQ&&dxL>dxQ*1.2?" (the side you sell into; the two-sided pool total is "+fmt(dxL)+")":"")+", market cap "+fmt(mcap)+". A 2x needs about "+fmt(mcap*2)+(st==="fail"?". You may not be able to sell.":".")+xt)}
+  add("warn","Honeypot, tax and LP lock","Not checked in this mode. Test with a tiny buy and sell before sizing up.");
+
+  const f=C.filter(x=>x.s==="fail").length,w=C.filter(x=>x.s==="warn").length,n=C.filter(x=>x.s==="na").length;
+  let cls,head,sub;
+  if(f){cls="fail";head="Skip it";sub=f+" check"+(f>1?"s":"")+" failed."}
+  else if(n>=3){cls="warn";head="Incomplete";sub="Too many checks could not load. Do the rest by hand."}
+  else{cls="warn";head="Caution";sub=w+" warning"+(w>1?"s":"")+". This mode cannot rule out a honeypot."}
+  const sym={pass:"✓",warn:"!",fail:"✕",na:"?"};
+  const name=pair?(pair.baseToken?.name+" ("+pair.baseToken?.symbol+")"):tok?(tok.name+" ("+tok.symbol+")"):"Unknown token";
+  window.__log=logLine(ca,name+" ["+chain+"]",head,C,null,mcap);
+  const srcs="DexScreener "+(pair?"✓":"✗")+" · Explorer "+(!onRH?"skipped":(addr||tok||items.length)?"✓":"✗");
+  const ex="https://robinhoodchain.blockscout.com/";
+  $("out").innerHTML=
+   `<div class="verdict ${cls}"><b>${head}</b><span>${esc(sub)}</span></div>`+
+   `<p class="tok">${esc(name)} · ${esc(chain)}</p><p class="src">${srcs}</p>`+
+   C.map(x=>`<div class="chk"><div class="dot ${x.s}">${sym[x.s]}</div><div><h3>${x.t}</h3><p>${esc(x.d)}</p></div></div>`).join("")+
+   `<div class="links"><a target="_blank" rel="noopener" href="https://dexscreener.com/${esc(chain)}/${ca}">DexScreener</a>`+
+   (onRH?`<a target="_blank" rel="noopener" href="${ex}token/${ca}">Explorer</a>`:"")+
+   (onRH&&cr?`<a target="_blank" rel="noopener" href="${ex}address/${cr}">Dev wallet</a>`:"")+`</div>`+
+   `<button class="paste" id="cp" style="margin-top:14px;padding:12px 16px">Copy log line</button>`+
+   `<p class="note">Robinhood Chain mode is new and has fewer checks than Solana mode. Treat it as a first filter only. Checker v3.</p>`;
+}
+function exitModel(size,{cv,pair,solUsd,onCurve}){
+  if(cv&&onCurve&&solUsd){const vT=Number(cv.vTok),vS=Number(cv.vSol),rS=Number(cv.rSol);if(!(vT>0&&vS>0))return null;
+    const px=(vS/1e9)/(vT/1e6)*solUsd,a=size/px*1e6*0.99,out=vS*a/(vT+a);
+    if(out>rS)return{fill:false};const usd=out/1e9*solUsd;return{fill:true,usd,slip:1-usd/size}}
+  const L=pair?.liquidity;
+  if(L&&L.base>0&&L.quote>0&&Number(pair.priceUsd)>0&&Number(pair.priceNative)>0){
+    if(Math.abs((L.quote/L.base)/Number(pair.priceNative)-1)>0.08)return null;
+    const pu=Number(pair.priceUsd),a=size/pu*0.99,usd=L.quote*a/(L.base+a)*(pu/Number(pair.priceNative));return{fill:true,usd,slip:1-usd/size}}
+  return null}
+function logLine(ca,name,verdict,C,onCurve,mcap){
+  const f=C.filter(x=>x.s==="fail").map(x=>x.t).join("; "),w=C.filter(x=>x.s==="warn").map(x=>x.t).join("; ");
+  return [new Date().toISOString().slice(0,16).replace("T"," "),name,ca,verdict,f||"-",w||"-",onCurve?"curve":"graduated/unknown",Math.round(mcap||0),"v3"].join("\t")}
+document.addEventListener("click",async e=>{if(e.target.id!=="cp")return;
+  try{await navigator.clipboard.writeText(window.__log);e.target.textContent="Copied"}catch(x){e.target.textContent="Copy failed"}
+  setTimeout(()=>{e.target.textContent="Copy log line"},1500)});
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+</script>
+</body>
+</html>
