@@ -1,0 +1,9 @@
+{
+  "name": "ca-checker",
+  "private": true,
+  "version": "3.1.0",
+  "description": "CA Checker v3.1 with Moonscan (DexScreener trending scan)",
+  "dependencies": {
+    "@netlify/blobs": "^8.0.0"
+  }
+}
