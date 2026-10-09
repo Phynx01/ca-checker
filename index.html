@@ -46,6 +46,94 @@ button{border:0;border-radius:10px;padding:0 16px;font:600 15px inherit;font-fam
 <div><label for="size">Size ($)</label><input id="size" type="number" inputmode="decimal" value="1"></div></div>
 <button class="go" id="go">Check token</button>
 <div id="out" aria-live="polite"></div>
+<!-- ============================================================
+  MOONSCAN PANEL for index.html  (checker v3.1-moonscan1)
+  Paste this block right after the manual-inputs area at the top
+  of the page (before the CA input, or just under it).
+
+  Then check TWO things against your file:
+   1. CA_INPUT_ID  -> the id of your contract-address <input>
+   2. run()        -> your existing scan function name (handoff says run)
+  ============================================================ -->
+<style>
+  #picks { margin: 12px 0; border: 1px solid #444; border-radius: 10px; padding: 10px 12px; }
+  #picks .pk-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+  #picks .pk-title { font-weight:700; }
+  #picks .pk-when { font-size:12px; opacity:.7; }
+  #picks .pk-row { display:flex; gap:8px; align-items:center; padding:7px 0; border-top:1px solid #333; font-size:13px; }
+  #picks .pk-badge { min-width:52px; text-align:center; border-radius:6px; padding:2px 6px; font-weight:700; font-size:11px; }
+  #picks .pick  { background:#0f5132; color:#fff; }
+  #picks .watch { background:#664d03; color:#fff; }
+  #picks .pk-info { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #picks .pk-reasons { opacity:.75; font-size:11px; }
+  #picks .pk-btn { background:#0d6efd; color:#fff; border:0; border-radius:6px; padding:5px 9px; font-size:12px; }
+  #picks .pk-note { font-size:11px; opacity:.6; margin-top:8px; }
+</style>
+
+<div id="picks">
+  <div class="pk-head">
+    <span class="pk-title">Trending picks (Moonscan)</span>
+    <span class="pk-when" id="pkWhen">loading</span>
+  </div>
+  <div id="pkList"><div style="opacity:.6">Loading...</div></div>
+  <div class="pk-note">Ranked candidates, not predictions. Rug checks are strict. The 10x part is luck and narrative. Always tap Check and read the full rows before buying.</div>
+</div>
+
+<script>
+(function () {
+  var RESULTS_URL = "/.netlify/functions/scan?results=1";
+  var CA_INPUT_ID = "ca";       // <-- set to the id of your CA input
+  var RUN_FN = "run";           // <-- your existing scan function (window.run)
+
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function money(v) { return v == null ? "?" : "$" + Number(v).toLocaleString(); }
+
+  function row(item) {
+    var facts = item.facts || {};
+    var bits = [];
+    if (facts.bondingPct != null) bits.push("bonding " + facts.bondingPct + "%");
+    bits.push("liq " + money(facts.liquidity));
+    if (facts.mcap != null) bits.push("mcap " + money(facts.mcap));
+    if (facts.top10 != null) bits.push("top10 " + facts.top10 + "%");
+    var name = item.label ? esc(item.label) + " " : "";
+    var short = item.ca.slice(0, 4) + "..." + item.ca.slice(-4);
+    return '<div class="pk-row">' +
+      '<span class="pk-badge ' + item.tier + '">' + item.tier.toUpperCase() + " " + item.score + "</span>" +
+      '<span class="pk-info">' + name + esc(short) + " | " + esc(bits.join(" | ")) + "</span>" +
+      (item.good && item.good.length ? '<div class="pk-reasons">' + esc(item.good.slice(0, 3).join("; ")) + "</div>" : "") +
+      '<button class="pk-btn" data-ca="' + esc(item.ca) + '">Check</button></div>';
+  }
+
+  function load() {
+    fetch(RESULTS_URL).then(function (r) { return r.json(); }).then(function (d) {
+      var el = document.getElementById("pkList");
+      var when = document.getElementById("pkWhen");
+      if (!d || d.empty) { el.innerHTML = '<div style="opacity:.6">No scan yet. The first run happens within 5 minutes of deploy.</div>'; when.textContent = ""; return; }
+      var mins = Math.round((Date.now() - d.ranAt) / 60000);
+      when.textContent = (mins < 1 ? "just now" : mins + " min ago") + " | scanned " + d.scanned;
+      var rows = (d.picks || []).concat(d.watches || []);
+      el.innerHTML = rows.length ? rows.map(row).join("") : '<div style="opacity:.6">Nothing passed the filter this run. That is the system working.</div>';
+      el.querySelectorAll(".pk-btn").forEach(function (b) {
+        b.onclick = function () {
+          var input = document.getElementById(CA_INPUT_ID);
+          if (input) {
+            input.value = b.getAttribute("data-ca");
+            if (typeof window[RUN_FN] === "function") window[RUN_FN]();
+            else input.dispatchEvent(new Event("input", { bubbles: true }));
+            window.scrollTo(0, 0);
+          }
+        };
+      });
+    }).catch(function () {
+      document.getElementById("pkList").innerHTML = '<div style="opacity:.6">Could not reach the scan function. If it says Checker v3.1 in the footer it may still be deploying.</div>';
+    });
+  }
+
+  load();
+  setInterval(load, 5 * 60 * 1000);
+})();
+</script>
+
 </main>
 <script>
 const $=id=>document.getElementById(id);
