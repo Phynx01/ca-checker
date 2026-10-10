@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paper Trading</title>
+<style>
+body{margin:0;padding:20px;background:#111827;color:#e5e7eb;font-family:-apple-system,system-ui,sans-serif;line-height:1.4}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:16px;margin:22px 0 8px;color:#9ca3af}
+.card{border:1px solid #374151;border-radius:14px;padding:14px;margin-bottom:10px}
+.big{font-size:30px;font-weight:700}.up{color:#34d399}.down{color:#f87171}.mut{color:#9ca3af;font-size:13px}
+.row{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid #1f2937}
+.row:first-child{border-top:0}.tag{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:2px 8px;font-size:12px}
+a{color:#60a5fa}
+</style></head><body>
+<h1>Paper Trading</h1>
+<div class="mut">Virtual money. Moonscan picks, strict gate. <a href="/">Back to checker</a></div>
+<div id="out" class="mut" style="margin-top:14px">Loading...</div>
+<script>
+var out = document.getElementById("out");
+function el(tag, text, cls, parent) {
+  var e = document.createElement(tag);
+  if (text !== undefined && text !== null) e.textContent = text;
+  if (cls) e.className = cls;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function sign(x) { return (x >= 0 ? "+" : "") + x; }
+function ago(ms) {
+  var m = Math.round((Date.now() - ms) / 60000);
+  return m < 60 ? m + " min" : Math.round(m / 6) / 10 + " h";
+}
+function list(parent, title, items, build) {
+  el("h2", title, null, parent);
+  var c = el("div", null, "card", parent);
+  if (!items.length) { el("div", "None yet", "mut", c); return; }
+  items.forEach(function (it) { build(el("div", null, "row", c), it); });
+}
+function render(d) {
+  out.textContent = ""; out.className = "";
+  var top = el("div", null, "card", out);
+  el("div", "$" + d.equity.toFixed(2), "big", top);
+  el("div", sign(d.pnl.toFixed(2)) + " vs $" + d.start + " start | cash $" + d.cash.toFixed(2) +
+     " | " + d.wins + "W / " + d.losses + "L", d.pnl >= 0 ? "up" : "down", top);
+  if (d.halted) el("div", "HALTED: equity fell under $" + d.rules.haltBelow + ", no new trades", "tag", top);
+  list(out, "Open (" + d.open.length + "/" + d.rules.maxOpen + ")", d.open, function (r, p) {
+    var l = el("div", null, null, r);
+    el("div", p.label || p.ca.slice(0, 8), null, l);
+    el("div", "held " + ago(p.openedAt) + " | liq $" + p.liq.toLocaleString(), "mut", l);
+    el("div", p.mult + "x", p.mult >= 1 ? "up" : "down", r);
+  });
+  list(out, "Waiting for confirmation", d.watch, function (r, w) {
+    el("div", w.label || w.ca.slice(0, 8), null, r);
+    el("div", w.count + "/" + w.need + " scans", "mut", r);
+  });
+  list(out, "Closed (last 15)", d.closed, function (r, t) {
+    var l = el("div", null, null, r);
+    el("div", t.label || t.ca.slice(0, 8), null, l);
+    el("div", t.why, "mut", l);
+    el("div", sign(t.pnlPct) + "% ($" + sign(t.pnl) + ")", t.pnl >= 0 ? "up" : "down", r);
+  });
+  var ru = d.rules;
+  el("h2", "Rules", null, out);
+  el("div", "$" + ru.size + " per trade, max " + ru.maxOpen + " open. Needs score " + ru.minScore +
+     "+, liquidity $" + ru.minLiq.toLocaleString() + "+, top10 under " + ru.maxTop10 + "%, " + ru.confirms +
+     " scans in a row. Take profit " + ru.takeProfit + ", stop loss " + ru.stopLoss +
+     ". Fills are 3% worse than the market price.", "mut", out);
+}
+fetch("/.netlify/functions/paper").then(function (r) { return r.json(); }).then(function (d) {
+  if (d.error) throw new Error(d.error);
+  render(d);
+}).catch(function (e) { out.textContent = "Failed to load: " + e.message; });
+</script></body></html>
