@@ -259,15 +259,54 @@ function evaluate(payload) {
   } };
 }
 
+function lpLocked(rug) {
+  const mk = (rug && rug.markets) || [];
+  let best = null, bestLiq = -1;
+  for (const m of mk) {
+    const lp = m && m.lp;
+    if (!lp) continue;
+    const pct = n(pick(lp, ["lpLockedPct", "lpLockedPercent"]));
+    if (pct === null) continue;
+    const liq = (n(pick(lp, ["baseUSD", "baseUsd"])) || 0) + (n(pick(lp, ["quoteUSD", "quoteUsd"])) || 0);
+    if (liq > bestLiq) { bestLiq = liq; best = pct; }
+  }
+  return best;
+}
+
+const GECKO_FEEDS = [
+  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h",
+  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=6h",
+];
+const SKIP_MINTS = new Set([
+  "So11111111111111111111111111111111111111112",
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+]);
+
+async function discoverV2() {
+  const feeds = await Promise.all(GECKO_FEEDS.map(u => j(u, 12000)));
+  const seen = new Map();
+  for (const feed of feeds) {
+    const pools = feed && Array.isArray(feed.data) ? feed.data : [];
+    for (const p of pools) {
+      const id = g(p, "relationships.base_token.data.id");
+      const ca = typeof id === "string" ? id.replace(/^solana_/, "") : null;
+      if (!ca || !SOLANA_MINT.test(ca) || SKIP_MINTS.has(ca) || seen.has(ca)) continue;
+      seen.set(ca, { ca, label: String(g(p, "attributes.name") || "").slice(0, 60) });
+    }
+  }
+  return [...seen.values()].slice(0, CAP);
+}
+
 // ---------- one full run ----------
 async function runScan() {
   const started = Date.now();
-  const cands = await discover();
+  const cands = await discoverV2();
   const checked = await mapLimit(cands, CONCURRENCY, async (c) => {
     const payload = await j(SELF_CHECK + encodeURIComponent(c.ca), CHECK_TIMEOUT);
     if (!payload) return { ...c, error: "check call failed" };
     const ev = evaluate(payload);
-    return { ...c, ...ev };
+    return { ...c, ...ev, lp: lpLocked(payload && payload.rug) };
   });
 
   const ok = checked.filter(x => x && !x.error && x.tier);
@@ -313,5 +352,8 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers });
   }
 };
+
+
+
 
 
