@@ -11,6 +11,7 @@ const MAX_OPEN = 3;
 const MIN_SCORE = 80;          // Moonscan score needed (scan's own pick bar is 65)
 const MIN_LIQ = 10000;         // live pool liquidity, USD
 const MAX_TOP10 = 25;          // top 10 holders %, must be known
+const MIN_LP_LOCK = 90;
 const MIN_MCAP = 15000, MAX_MCAP = 500000;
 const CONFIRMS = 3;            // must be a pick in 3 scans in a row (about 15 min)
 const MAX_RUN_UP = 1.5;        // reset if price is 1.5x its first sighting (chasing)
@@ -71,6 +72,7 @@ function gate(p, pair) {
   if (!(p.score >= MIN_SCORE)) return "score " + p.score;
   if (p.hard && p.hard.length) return "hard flag";
   if (f.top10 === null || f.top10 === undefined || f.top10 > MAX_TOP10) return "top10";
+  if (p.lp === null || p.lp === undefined || p.lp < MIN_LP_LOCK) return "LP not locked";
   if (!f.mcap || f.mcap < MIN_MCAP || f.mcap > MAX_MCAP) return "mcap";
   if (!f.liquidity || f.liquidity < MIN_LIQ) return "scan liquidity";
   if (pair.liq < MIN_LIQ) return "live liquidity";
