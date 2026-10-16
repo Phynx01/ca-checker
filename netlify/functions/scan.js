@@ -273,17 +273,23 @@ function lpLocked(rug) {
   return best;
 }
 
-// ---------- discovery: new pools (Axiom-style "just launched or migrated") plus trending ----------
-// All free, no API key. New pools are pre-filtered with the paper trader's own limits, so
-// check calls are not spent on coins that could never qualify. Trending is added after them
-// unfiltered, as before, so the panel still shows larger coins.
+// ---------- discovery: new pools, most volume, top gainers and trending (all free, no key) ----------
+// Everything except trending is pre-filtered with the paper trader's own limits, so check calls
+// are not spent on coins that could never qualify. Gainers are ranked from the pools already
+// fetched (GeckoTerminal has no gainers feed). Coins the paper trader is still confirming are
+// always scanned first, so a changing ranking cannot reset their 3-in-a-row count.
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2/networks/solana/";
 const GECKO_NEW = [GECKO_BASE + "new_pools?page=1", GECKO_BASE + "new_pools?page=2"];
+const GECKO_VOL = [
+  GECKO_BASE + "pools?sort=h24_volume_usd_desc&order=h24_volume_usd_desc&page=1",
+  GECKO_BASE + "pools?sort=h24_volume_usd_desc&order=h24_volume_usd_desc&page=2",
+];
 const GECKO_FEEDS = [
   GECKO_BASE + "trending_pools?duration=1h",
   GECKO_BASE + "trending_pools?duration=6h",
 ];
 const PRE_MIN_LIQ = 10000, PRE_MIN_MCAP = 15000, PRE_MAX_MCAP = 500000;
+const GAIN_MIN = 10, GAIN_MAX = 150;   // 1h change band; 150 matches the paper trader's "already pumped" limit
 const SKIP_MINTS = new Set([
   "So11111111111111111111111111111111111111112",
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
@@ -295,43 +301,73 @@ function geckoMint(p) {
   const ca = typeof id === "string" ? id.replace(/^solana_/, "") : null;
   return ca && SOLANA_MINT.test(ca) && !SKIP_MINTS.has(ca) ? ca : null;
 }
-function geckoLabel(p) { return String(g(p, "attributes.name") || "").slice(0, 60); }
-function poolsOf(feed) { return feed && Array.isArray(feed.data) ? feed.data : []; }
-
-async function discoverFree() {
-  const [newFeeds, trendFeeds] = await Promise.all([
-    Promise.all(GECKO_NEW.map(u => j(u, 12000))),
-    Promise.all(GECKO_FEEDS.map(u => j(u, 12000))),
-  ]);
-  const seen = new Map();
-  let looked = 0, passed = 0;
-
-  for (const feed of newFeeds) {
-    for (const p of poolsOf(feed)) {
-      looked++;
-      const a = (p && p.attributes) || {};
-      const liq = a.reserve_in_usd == null ? null : n(a.reserve_in_usd);
-      const mcRaw = a.market_cap_usd != null ? a.market_cap_usd : a.fdv_usd;
-      const mc = mcRaw == null ? null : n(mcRaw);
-      if (liq === null || liq < PRE_MIN_LIQ) continue;
-      if (!(mc > 0) || mc < PRE_MIN_MCAP || mc > PRE_MAX_MCAP) continue;   // unknown cap = skip
+function parsePools(feeds) {
+  const out = [];
+  for (const feed of feeds) {
+    for (const p of (feed && Array.isArray(feed.data) ? feed.data : [])) {
       const ca = geckoMint(p);
-      if (!ca || seen.has(ca)) continue;
-      seen.set(ca, { ca, label: geckoLabel(p) });
-      passed++;
+      if (!ca) continue;
+      const a = (p && p.attributes) || {};
+      const mcRaw = a.market_cap_usd != null ? a.market_cap_usd : a.fdv_usd;
+      const h1Raw = g(p, "attributes.price_change_percentage.h1");
+      out.push({
+        ca,
+        label: String(a.name || "").slice(0, 60),
+        liq: a.reserve_in_usd == null ? null : n(a.reserve_in_usd),
+        mc: mcRaw == null ? null : n(mcRaw),
+        h1: h1Raw == null ? null : n(h1Raw),
+      });
     }
   }
-  for (const feed of trendFeeds) {
-    for (const p of poolsOf(feed)) {
-      const ca = geckoMint(p);
-      if (!ca || seen.has(ca)) continue;
-      seen.set(ca, { ca, label: geckoLabel(p) });
+  return out;
+}
+// unknown liquidity or market cap counts as a fail; unknown 1h change is allowed
+function qualifies(x) {
+  return x.liq !== null && x.liq >= PRE_MIN_LIQ && x.mc > 0 && x.mc >= PRE_MIN_MCAP && x.mc <= PRE_MAX_MCAP
+    && !(x.h1 > GAIN_MAX);   // already pumped past the paper trader's limit
+}
+
+async function discoverFree() {
+  const [nf, vf, tf] = await Promise.all([
+    Promise.all(GECKO_NEW.map(u => j(u, 12000))),
+    Promise.all(GECKO_VOL.map(u => j(u, 12000))),
+    Promise.all(GECKO_FEEDS.map(u => j(u, 12000))),
+  ]);
+  const newP = parsePools(nf), volP = parsePools(vf), trendP = parsePools(tf);
+  const newList = newP.filter(qualifies);
+  const volList = volP.filter(qualifies);
+  const gainers = [...newP, ...volP, ...trendP]
+    .filter(x => qualifies(x) && x.h1 !== null && x.h1 >= GAIN_MIN && x.h1 <= GAIN_MAX)
+    .sort((a, b) => b.h1 - a.h1);
+
+  let sticky = [];
+  try {
+    const st = await getStore("paper").get("state", { type: "json" });
+    if (st && st.watch) sticky = Object.entries(st.watch).slice(0, 5).map(([ca, w]) => ({ ca, label: (w && w.label) || "" }));
+  } catch {}
+
+  const seen = new Map();
+  const add = (x) => { if (!seen.has(x.ca)) seen.set(x.ca, { ca: x.ca, label: x.label }); };
+  sticky.forEach(add);
+
+  // take turns between the four lists so every feed gets slots
+  const lists = [newList, volList, gainers, trendP];
+  const pos = lists.map(() => 0);
+  let added = true;
+  while (seen.size < CAP && added) {
+    added = false;
+    for (let k = 0; k < lists.length && seen.size < CAP; k++) {
+      while (pos[k] < lists[k].length) {
+        const x = lists[k][pos[k]++];
+        if (!seen.has(x.ca)) { add(x); added = true; break; }
+      }
     }
   }
   return {
     cands: [...seen.values()].slice(0, CAP),
-    source: "geckoterminal (new pools + trending)",
-    note: "new pools: " + passed + " of " + looked + " passed the prefilter",
+    source: "geckoterminal (new, volume, gainers, trending)",
+    note: "passed prefilter: new " + newList.length + "/" + newP.length + ", volume " + volList.length + "/" + volP.length +
+          ", gainers " + gainers.length + "; trending " + trendP.length + "; kept from watchlist " + sticky.length,
   };
 }
 
@@ -392,6 +428,9 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers });
   }
 };
+
+
+
 
 
 
