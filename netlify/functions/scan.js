@@ -298,10 +298,94 @@ async function discoverV2() {
   return [...seen.values()].slice(0, CAP);
 }
 
+// ---------- Mobula Pulse discovery (Axiom-style "Migrated" list) ----------
+// Needs a free API key in the Netlify env var MOBULA_API_KEY. Never put the key in this file,
+// the repo is public. The server-side filters below copy the paper trader's existing rules
+// (market cap, liquidity, top10) so discovery only hands over coins that could qualify.
+// If Mobula fails or has no key, discovery falls back to GeckoTerminal trending.
+const MOBULA_URL = "https://api.mobula.io/api/2/pulse";
+const MOBULA_VIEW = "migrated";
+const MOBULA_OK_TTL_MS = 10 * 60 * 1000;   // reuse a good list for 10 min (saves credits)
+const MOBULA_ERR_TTL_MS = 5 * 60 * 1000;   // after an error, wait 5 min before calling again
+
+function mintOf(d) {
+  if (!d) return null;
+  let a = d.address || d.tokenAddress || d.mint;
+  if (!a && d.pair && d.pair.baseToken && d.pair[d.pair.baseToken]) a = d.pair[d.pair.baseToken].address;
+  return typeof a === "string" ? a : null;
+}
+
+async function mobulaPulse() {
+  const key = process.env.MOBULA_API_KEY;
+  if (!key) return { ok: false, cands: [], note: "no MOBULA_API_KEY set" };
+  const body = {
+    assetMode: true,
+    filterQuotes: true,
+    views: [{
+      name: MOBULA_VIEW, model: "bonded", chainId: ["solana:solana"],
+      sortBy: "volume_1h", sortOrder: "desc", limit: 30,
+      filters: {
+        market_cap: { gte: 15000, lte: 500000 },
+        liquidity: { gte: 10000 },
+        top_10_holdings_percentage: { lte: 25 },
+      },
+    }],
+  };
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(MOBULA_URL, {
+      method: "POST", signal: ctrl.signal,
+      headers: { "content-type": "application/json", accept: "application/json", authorization: key },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      let msg = ""; try { msg = (await r.text()).slice(0, 120); } catch {}
+      return { ok: false, cands: [], note: "mobula HTTP " + r.status + " " + msg };
+    }
+    const data = await r.json();
+    const root = (data && data.payload) || data || {};
+    const view = root[MOBULA_VIEW];
+    if (!view || !Array.isArray(view.data)) return { ok: false, cands: [], note: "mobula reply had no view data" };
+    const seen = new Map();
+    for (const d of view.data) {
+      const ca = mintOf(d);
+      if (!ca || !SOLANA_MINT.test(ca) || SKIP_MINTS.has(ca) || seen.has(ca)) continue;
+      const label = ((d.tokenSymbol || "") + " " + (d.tokenName || "")).trim().slice(0, 60);
+      seen.set(ca, { ca, label });
+    }
+    return { ok: true, cands: [...seen.values()], note: "" };
+  } catch (e) {
+    return { ok: false, cands: [], note: "mobula error: " + String((e && e.message) || e) };
+  } finally { clearTimeout(t); }
+}
+
+async function discoverSmart() {
+  const store = getStore("moonscan");
+  let cached = null;
+  try { cached = await store.get("mobula-cache", { type: "json" }); } catch {}
+  const age = cached ? Date.now() - cached.at : Infinity;
+
+  if (cached && cached.ok && age < MOBULA_OK_TTL_MS) {
+    return { cands: cached.cands.slice(0, CAP), source: cached.cands.length ? "mobula (cached)" : "mobula (no matches, cached)", note: "" };
+  }
+  let note = "";
+  if (cached && !cached.ok && age < MOBULA_ERR_TTL_MS) {
+    note = cached.note;                       // recent failure, do not hammer the API
+  } else {
+    const m = await mobulaPulse();
+    try { await store.setJSON("mobula-cache", { at: Date.now(), ok: m.ok, cands: m.cands, note: m.note }); } catch {}
+    if (m.ok) return { cands: m.cands.slice(0, CAP), source: m.cands.length ? "mobula" : "mobula (no matches)", note: "" };
+    note = m.note;
+  }
+  return { cands: await discoverV2(), source: "geckoterminal (fallback)", note };
+}
+
 // ---------- one full run ----------
 async function runScan() {
   const started = Date.now();
-  const cands = await discoverV2();
+  const disc = await discoverSmart();
+  const cands = disc.cands;
   const checked = await mapLimit(cands, CONCURRENCY, async (c) => {
     const payload = await j(SELF_CHECK + encodeURIComponent(c.ca), CHECK_TIMEOUT);
     if (!payload) return { ...c, error: "check call failed" };
@@ -316,6 +400,8 @@ async function runScan() {
     ranAt: Date.now(),
     ranAtISO: new Date().toISOString(),
     durationMs: Date.now() - started,
+    source: disc.source,
+    discoveryNote: disc.note,
     scanned: checked.length,
     picks: ok.filter(x => x.tier === "pick").slice(0, 10),
     watches: ok.filter(x => x.tier === "watch").slice(0, 10),
@@ -352,6 +438,9 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 500, headers });
   }
 };
+
+
+
 
 
 
