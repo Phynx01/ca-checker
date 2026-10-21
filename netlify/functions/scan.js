@@ -17,7 +17,7 @@ const SITE = "https://degen-checker.netlify.app";
 const SELF_CHECK = SITE + "/.netlify/functions/check?ca=";
 
 // ---- knobs you can tune ----
-const CAP = 10;             // max candidates checked per run. Invocation budget:
+const CAP = 5;             // max candidates checked per run. Invocation budget:
                             // 10 * 288 runs/day * 31 = ~89k/month of the 125k free tier,
                             // plus ~9k for the scheduled runs themselves. Raise with care.
 const CONCURRENCY = 3;      // checks run in parallel, be kind to public APIs
