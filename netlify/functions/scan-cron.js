@@ -5,4 +5,5 @@ export default async () => {
   try { await fetch(BASE + "paper?tick=1"); } catch (e) { console.log("paper failed", String(e)); }
 };
 
-export const config = { schedule: "*/5 * * * *" };
+export const config = { schedule: "*/15 * * * *" };
+
