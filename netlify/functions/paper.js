@@ -1,32 +1,33 @@
 // netlify/functions/paper.js
 // Paper trading for Moonscan picks. Virtual money only. No schedule here on purpose:
-// scan-cron.js calls  /paper?tick=1  every 5 minutes. Read state: /paper
+// scan-cron.js calls  /paper?tick=1  every 15 minutes. Read state: /paper
 // Reset the sim: /paper?reset=yes  (wipes all history — only on purpose)
 //
-// strategy v2: half out at +50% then trail, no-chase entries,
-// loss-streak cooldown, daily loss limit, halt re-checked every tick.
+// strategy v3 "survival first": only graduated, established pools;
+// enter on weakness; staged exits; cooldowns; un-latched halt.
 
 import { getStore } from "@netlify/blobs";
 
-// ---- entries ----
+// ---- entries (the edge is refusing almost everything) ----
 const START = 50;              // virtual dollars
-const SIZE = 2;                // dollars per trade (was 5)
-const MAX_OPEN = 2;            // was 3
-const MIN_SCORE = 80;          // Moonscan score needed (scan's own pick bar is 65)
-const MIN_LIQ = 15000;         // live pool liquidity, USD (was 10000)
-const MAX_TOP10 = 25;          // top 10 holders %, must be known
+const SIZE = 2;                // dollars per trade
+const MAX_OPEN = 2;
+const MIN_SCORE = 80;
+const MIN_LIQ = 100000;        // $100k real liquidity — thin pools are where -99% lives
+const MAX_TOP10 = 20;          // top 10 holders %, must be known
 const MIN_LP_LOCK = 90;
 const MIN_MCAP = 15000, MAX_MCAP = 500000;
-const CONFIRMS = 3;            // must be a pick in 3 scans in a row (about 15 min)
-const MAX_RUN_UP = 1.15;       // was 1.5 — reset if +15% above first sighting (no chasing)
-const MIN_DIP = 0.90;          // was 0.85
-const MAX_H1_PUMP = 60;        // was 150 — skip if already up 60% in 1h
+const CONFIRMS = 3;            // must pass the gate in 3 scans in a row
+const MAX_RUN_UP = 1.15;       // reset if +15% above first sighting (no chasing)
+const MIN_DIP = 0.90;          // reset if -10% below first sighting
+const MAX_H1_PUMP = 30;        // enter on weakness: skip if already +30% this hour
+const MIN_AGE_MS = 24 * 3600 * 1000;  // pool must have survived a full day
 
-// ---- exits ----
+// ---- exits (unchanged from v2 — exits were never the problem) ----
 const TP1 = 1.5;               // sell half at +50%
 const SL = 0.75;               // hard stop -25% before TP1
 const TRAIL = 0.85;            // after TP1, remainder exits on 15% pullback from peak
-const MAX_HOLD_MS = 4 * 3600 * 1000;    // was 12h
+const MAX_HOLD_MS = 4 * 3600 * 1000;
 const TIME_STOP_MS = 3 * 3600 * 1000;   // if not +5% after 3h, the coin is dead
 const TIME_STOP_MULT = 1.05;
 
@@ -38,9 +39,9 @@ const THIN_SELL_HAIRCUT = 0.10;
 
 // ---- safety ----
 const HALT_EQUITY = 40;        // re-checked every tick (not latched)
-const MAX_MISSES = 6;          // no price for 6 ticks (30 min) = assume dead, write off
+const MAX_MISSES = 6;          // no price for 6 ticks (90 min) = assume dead, write off
 const LOSS_STREAK_HALT = 3;    // after 3 straight losses...
-const COOLDOWN_TICKS = 12;     // ...no new entries for ~1 hour
+const COOLDOWN_TICKS = 12;     // ...no new entries for ~3 hours
 const DAILY_LOSS_PCT = 0.20;   // down 20% from day's start = no new entries until tomorrow
 
 function fresh() {
@@ -65,7 +66,8 @@ async function getPair(ca) {
     const price = Number(p.priceUsd);
     if (!Number.isFinite(price) || price <= 0) return null;
     const h1 = p.priceChange && Number.isFinite(Number(p.priceChange.h1)) ? Number(p.priceChange.h1) : null;
-    return { price, liq: (p.liquidity && Number(p.liquidity.usd)) || 0, h1 };
+    const ageMs = p.pairCreatedAt ? Date.now() - Number(p.pairCreatedAt) : null;
+    return { price, liq: (p.liquidity && Number(p.liquidity.usd)) || 0, h1, ageMs };
   } catch { return null; } finally { clearTimeout(t); }
 }
 
@@ -80,7 +82,7 @@ function closePos(st, pos, price, liq, why, now) {
   if (pnl >= 0) { st.wins++; st.lossStreak = 0; }
   else {
     st.losses++; st.lossStreak++;
-    if (st.lossStreak >= LOSS_STREAK_HALT) st.cooldownUntil = now + COOLDOWN_TICKS * 5 * 60 * 1000;
+    if (st.lossStreak >= LOSS_STREAK_HALT) st.cooldownUntil = now + COOLDOWN_TICKS * 15 * 60 * 1000;
   }
   st.closed.unshift({ ca: pos.ca, label: pos.label, cost: r2(pos.cost), proceeds: r2((pos.realized || 0) + proceeds),
     pnl: r2(pnl), pnlPct: r2((pnl / pos.cost) * 100), why, openedAt: pos.openedAt, closedAt: now });
@@ -93,6 +95,8 @@ function gate(p, pair) {
   if (p.tier !== "pick") return "not a pick";
   if (!(p.score >= MIN_SCORE)) return "score " + p.score;
   if (p.hard && p.hard.length) return "hard flag";
+  if (f.onCurve !== false) return "not graduated";         // no bonding-curve coins
+  if (pair.ageMs == null || pair.ageMs < MIN_AGE_MS) return "pool too young";
   if (f.top10 === null || f.top10 === undefined || f.top10 > MAX_TOP10) return "top10";
   if (p.lp === null || p.lp === undefined || p.lp < MIN_LP_LOCK) return "LP not locked";
   if (!f.mcap || f.mcap < MIN_MCAP || f.mcap > MAX_MCAP) return "mcap";
@@ -175,7 +179,7 @@ async function tick(store) {
       let w = st.watch[p.ca];
       if (!w) { st.watch[p.ca] = { count: 1, firstPrice: pair.price, label: p.label, firstAt: now }; continue; }
       const ratio = pair.price / w.firstPrice;
-      if (ratio > MAX_RUN_UP || ratio < MIN_DIP) { delete st.watch[p.ca]; continue; }
+      if (ratio > MAX_RUN_UP || ratio < MIN_DIP) { delete st.watch[ca]; continue; }
       w.count++;
       if (w.count < CONFIRMS) continue;
       if (st.halted || dailyStop || now < st.cooldownUntil || st.open.length >= MAX_OPEN || st.cash < SIZE) continue;
@@ -204,7 +208,8 @@ function view(st) {
     closed: st.closed.slice(0, 15),
     watch: Object.entries(st.watch).map(([ca, w]) => ({ ca, label: w.label, count: w.count, need: CONFIRMS })),
     rules: { size: SIZE, maxOpen: MAX_OPEN, minScore: MIN_SCORE, minLiq: MIN_LIQ, maxTop10: MAX_TOP10,
-      confirms: CONFIRMS, takeProfit: "half at +" + Math.round((TP1 - 1) * 100) + "%, trail rest",
+      minPoolAgeHrs: MIN_AGE_MS / 3600000, graduatedOnly: true,
+      takeProfit: "half at +" + Math.round((TP1 - 1) * 100) + "%, trail rest",
       stopLoss: "-" + Math.round((1 - SL) * 100) + "%", haltBelow: HALT_EQUITY,
       lossStreakHalt: LOSS_STREAK_HALT, dailyLossPct: DAILY_LOSS_PCT },
   };
